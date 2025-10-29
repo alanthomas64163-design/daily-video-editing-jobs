@@ -214,7 +214,7 @@ def send_telegram_short(text):
 
 # ---------- MAIN ----------
 def main():
-    print("[START] job_alert run:", datetime.datetime.datetime.now().isoformat())
+    print("[START] job_alert run:", datetime.datetime.now().isoformat())
     prev_ids = load_previous()
     found = []
     # initialize new_jobs variable so we never get NameError

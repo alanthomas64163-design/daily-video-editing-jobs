@@ -1,8 +1,11 @@
 name: daily-job-alert
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: "30 6 * * *"   # 06:30 UTC = 12:00 PM IST
-  workflow_dispatch: {}     # allows manual runs
+  workflow_dispatch: {}
 
 jobs:
   run:
@@ -14,10 +17,20 @@ jobs:
         with:
           python-version: 3.11
       - name: Install dependencies
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 feedparser || pip install requests beautifulsoup4
       - name: Run script
         env:
           ALERT_TO_EMAIL: ${{ secrets.ALERT_TO_EMAIL }}
           ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
           ALERT_SMTP_PASS: ${{ secrets.ALERT_SMTP_PASS }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python job_alert.py
+      - name: Commit updated previous_jobs.json (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add previous_jobs.json || true
+          git diff --quiet --cached || (git commit -m "Update job history" && git push)
+

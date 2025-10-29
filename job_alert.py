@@ -249,3 +249,4 @@ if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
     txt = f"✅ {len(new_jobs)} new jobs found today. Check your email for full list."
     send_telegram_short(txt)
 
+

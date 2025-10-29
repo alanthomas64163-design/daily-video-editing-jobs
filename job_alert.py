@@ -284,4 +284,3 @@ else:
     print("[INFO] No new jobs found. Nothing to send.")
 
 
-

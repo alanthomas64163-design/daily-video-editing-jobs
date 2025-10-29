@@ -1,0 +1,23 @@
+name: daily-job-alert
+on:
+  schedule:
+    - cron: "30 6 * * *"   # 06:30 UTC = 12:00 PM IST
+  workflow_dispatch: {}     # allows manual runs
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+      - name: Run script
+        env:
+          ALERT_TO_EMAIL: ${{ secrets.ALERT_TO_EMAIL }}
+          ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+          ALERT_SMTP_PASS: ${{ secrets.ALERT_SMTP_PASS }}
+        run: python job_alert.py

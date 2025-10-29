@@ -277,7 +277,12 @@ def main():
 if __name__ == "__main__":
     main()
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    if 'new_jobs' in locals() and new_jobs:
     txt = f"✅ {len(new_jobs)} new jobs found today. Check your email for full list."
+    send_email(txt, html)
+else:
+    print("[INFO] No new jobs found. Nothing to send.")
+
     send_telegram_short(txt)
 
 

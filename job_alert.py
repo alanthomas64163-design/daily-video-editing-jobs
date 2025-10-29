@@ -10,6 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from bs4 import BeautifulSoup
 from datetime import datetime
+from typing import List, Dict, Optional, Any
 
 # ---------- CONFIG ----------
 KEYWORDS = [
@@ -19,16 +20,16 @@ KEYWORDS = [
 ]
 
 SOURCES = [
-    {"type": "html", "name": "Indeed", "url": "https://www.indeed.com/jobs?q=entry+level+video+editor"},
-    {"type": "html", "name": "Wellfound", "url": "https://wellfound.com/jobs?query=video%20editor"},
-    {"type": "html", "name": "RemoteRocketship", "url": "https://remoterocketship.com/jobs?search=junior+video+editor"},
+    {"type": "indeed", "name": "Indeed", "url": "https://www.indeed.com/jobs?q=entry+level+video+editor"},
+    {"type": "wellfound", "name": "Wellfound", "url": "https://wellfound.com/jobs?query=video%20editor"},
+    {"type": "generic_html", "name": "RemoteRocketship", "url": "https://remoterocketship.com/jobs?search=junior+video+editor"},
 ]
 
 REMOTIVE_API = "https://remotive.com/api/remote-jobs?search=video%20editor"
 
 PREV_FILE = "previous_jobs.json"
 
-# Environment variables (retrieved from system environment)
+# Environment variables
 TO_EMAIL = os.getenv("ALERT_TO_EMAIL")
 FROM_EMAIL = os.getenv("ALERT_FROM_EMAIL")
 SMTP_PASS = os.getenv("ALERT_SMTP_PASS")
@@ -36,28 +37,37 @@ SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Browser-like headers (important to avoid 403)
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.google.com/"
-}
+# Browser-like headers for rotation (important to avoid 403)
+# Added multiple User-Agents for random selection
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
 
 # ---------- HELPERS ----------
-def safe_get_text(url, headers=None, retries=3, backoff=2):
+def get_random_headers():
+    """Returns a dictionary of headers with a random User-Agent."""
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
+    }
+
+def safe_get_text(url, retries=3, backoff=2):
     """GET with retries, exponential backoff. Returns text or empty string."""
-    hdrs = headers or HEADERS
     for attempt in range(1, retries + 1):
+        # Use a random set of headers for each attempt
+        hdrs = get_random_headers()
         try:
             r = requests.get(url, headers=hdrs, timeout=20)
             if r.status_code == 200:
                 return r.text
             if r.status_code == 429:
-                wait = backoff * attempt + random.uniform(2, 5)
+                # Increased random jitter to help with persistent throttling
+                wait = backoff * attempt + random.uniform(5, 10) 
                 print(f"[WARN] 429 from {url}. Sleeping {wait:.1f}s (attempt {attempt})")
                 time.sleep(wait)
                 continue
@@ -72,38 +82,101 @@ def safe_get_text(url, headers=None, retries=3, backoff=2):
     print(f"[ERROR] Failed to fetch {url} after {retries} attempts.")
     return ""
 
+def clean_text(element) -> str:
+    """Helper to get and clean text from a BeautifulSoup element."""
+    return element.get_text(strip=True) if element else "N/A"
 
-def fetch_html_items(url):
-    """Fetches HTML and extracts general job links using a broad approach."""
-    text = safe_get_text(url)
-    if not text:
-        return []
-    soup = BeautifulSoup(text, "html.parser")
-    items = []
-    # Broadly look for all links, then filter by title later
-    for a in soup.find_all("a", href=True):
-        title = (a.get_text() or "").strip()
-        href = a["href"]
-        # Basic filtering to exclude short, non-descriptive links
-        if not title or len(title) < 15 or len(title) > 200:
-            continue
+# ---------- DEDICATED SCRAPERS ----------
+
+def scrape_indeed(url, html_content: str) -> List[Dict[str, str]]:
+    """Scrapes Indeed job listings using specific class selectors."""
+    jobs = []
+    if not html_content: return jobs
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        # Indeed job card selector based on current site structure (highly specific)
+        job_cards = soup.find_all('div', class_=lambda x: x and 'cardOutline' in x) 
         
-        # Ensure the link is absolute
-        if not href.startswith("http"):
-            href = requests.compat.urljoin(url, href)
+        for card in job_cards:
+            title_tag = card.find('h2', class_=lambda x: x and 'jobTitle' in x)
+            company_tag = card.find('span', class_=lambda x: x and 'companyName' in x)
+            link_tag = title_tag.find('a') if title_tag else None
+
+            if link_tag and company_tag:
+                title = clean_text(title_tag)
+                company = clean_text(company_tag)
+                link_suffix = link_tag.get('href')
+                
+                # Construct the full URL
+                if link_suffix.startswith('/'):
+                    link = f"https://www.indeed.com{link_suffix}"
+                else:
+                    link = link_suffix
+                
+                jobs.append({"title": title, "company": company, "link": link, "source": "Indeed"})
+
+    except Exception as e:
+        print(f"[ERROR] Indeed scraping failed: {e}")
+    return jobs
+
+def scrape_wellfound(url, html_content: str) -> List[Dict[str, str]]:
+    """Scrapes Wellfound (AngelList Talent) job listings using specific class selectors."""
+    jobs = []
+    if not html_content: return jobs
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        # Targeting the job card element using modern Wellfound classes
+        job_cards = soup.find_all('div', class_=lambda x: x and 'Card_card' in x)
+        
+        for card in job_cards:
+            # Title and Link
+            link_tag = card.find('a', class_=lambda x: x and 'styles_title' in x)
             
-        # Basic guess for the company name (since specific selectors are missing)
-        # In a real scenario, this would need specific per-site logic, but for a general
-        # scraper, we'll leave company blank and rely on the full title/link.
-        
-        items.append({"title": title, "link": href, "company": None}) 
+            # Company
+            company_tag = card.find('a', class_=lambda x: x and 'styles_startupName' in x)
+
+            if link_tag and company_tag:
+                title = clean_text(link_tag)
+                # Ensure link is absolute
+                link = requests.compat.urljoin(url, link_tag.get('href'))
+                company = clean_text(company_tag)
+                
+                jobs.append({"title": title, "company": company, "link": link, "source": "Wellfound"})
+
+    except Exception as e:
+        print(f"[ERROR] Wellfound scraping failed: {e}")
+    return jobs
+
+def scrape_generic_html(url, html_content: str) -> List[Dict[str, str]]:
+    """Generic scraping fallback (used for RemoteRocketship) using broad link finding."""
+    items = []
+    if not html_content: return items
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        # Find elements that look like job cards or links
+        for a in soup.find_all("a", href=True):
+            title = (a.get_text() or "").strip()
+            href = a["href"]
+            
+            # Filtering heuristic: title must be long enough to be a job title
+            if len(title) < 15 or len(title) > 200:
+                continue
+
+            # Ensure the link is absolute
+            if not href.startswith("http"):
+                href = requests.compat.urljoin(url, href)
+                
+            # Generic scraper cannot easily determine company, so we leave it empty
+            items.append({"title": title, "link": href, "company": None})
+    except Exception as e:
+        print(f"[ERROR] Generic HTML scraping failed: {e}")
     return items
 
 
 def fetch_remotive_jobs():
     """Fetches jobs from the Remotive API."""
     try:
-        r = requests.get(REMOTIVE_API, headers=HEADERS, timeout=15)
+        r = requests.get(REMOTIVE_API, headers=get_random_headers(), timeout=15)
         r.raise_for_status()
         data = r.json()
         jobs = []
@@ -120,6 +193,14 @@ def fetch_remotive_jobs():
         return []
 
 
+# Map the source type strings to the actual scraping functions
+SCRAPER_MAP = {
+    "indeed": scrape_indeed,
+    "wellfound": scrape_wellfound,
+    "generic_html": scrape_generic_html,
+}
+
+
 def keywords_match(title):
     """Checks if the job title contains any of the defined keywords."""
     t = (title or "").lower()
@@ -130,9 +211,7 @@ def job_id(job):
     """Generates a unique ID for a job using link or a hash of title/company/source."""
     link = job.get("link")
     if link:
-        # Use link as ID if available and valid
         return link
-    # Fallback to hash if link is missing
     s = (job.get("title", "") + "|" + job.get("company", "") + "|" + job.get("source", "")).strip()
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -221,7 +300,7 @@ def send_via_gmail(html_body, subject="Daily Job Alert"):
     msg.attach(MIMEText(html_body, "html"))
     
     try:
-        # Use port 587 (TLS) or 465 (SSL). Using 465 as per common setup.
+        # Use port 465 (SSL)
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
             s.login(FROM_EMAIL, SMTP_PASS)
             s.send_message(msg)
@@ -234,7 +313,7 @@ def send_via_gmail(html_body, subject="Daily Job Alert"):
 
 def send_via_sendgrid(html_body, subject="Daily Job Alert"):
     """Sends email via SendGrid API."""
-    if not SENDGRID_API_KEY:
+    if not (SENDGRID_API_KEY and TO_EMAIL and FROM_EMAIL):
         return False
     
     try:
@@ -282,22 +361,31 @@ def main():
     # --- 1. Fetch from HTML Job Boards ---
     for s in SOURCES:
         url = s.get("url")
-        print(f"[FETCH] {s.get('name')} -> {url}")
+        source_type = s.get("type", "generic_html")
+        source_name = s.get("name")
+        print(f"[FETCH] {source_name} -> {url}")
+        
         try:
-            # Use the generic item fetcher
-            items = fetch_html_items(url)
+            html_content = safe_get_text(url)
+            
+            scraper_func = SCRAPER_MAP.get(source_type, scrape_generic_html)
+            items = scraper_func(url, html_content)
+            
             for it in items:
-                if keywords_match(it.get("title", "")):
-                    it.setdefault("source", s.get("name"))
-                    # If company wasn't scraped, default it based on source name
-                    if not it.get("company"):
-                        it["company"] = f"Unknown ({s.get('name')})"
+                # Ensure the title matches keywords and link is present
+                if keywords_match(it.get("title", "")) and it.get("link"):
+                    it["source"] = source_name # Ensure source is set
+                    # If company is None (e.g., from generic scraper), set a placeholder
+                    if not it.get("company") or it.get("company") == "N/A":
+                        it["company"] = f"Unknown ({source_name})"
                     found.append(it)
-            # Add a small, random delay to reduce scraping footprint
+            
+            print(f"[PARSE] Found {len(items)} items on {source_name}, {len(found) - len(new_jobs)} match keywords so far.") # Crude counter
             time.sleep(random.uniform(2.0, 4.0)) 
         except Exception as e:
-            print(f"[ERROR] Exception while processing {s.get('name')}: {e}")
-
+            print(f"[ERROR] Exception while processing {source_name}: {e}")
+            
+    
     # --- 2. Fetch from reliable API fallback ---
     print("[INFO] Fetching Remotive API fallback")
     rem = fetch_remotive_jobs()
@@ -307,6 +395,7 @@ def main():
 
     # --- 3. Identify New Jobs and Update IDs ---
     current_ids = set(prev_ids)
+    
     for job in found:
         jid = job_id(job)
         if jid not in current_ids:
@@ -330,9 +419,9 @@ def main():
         if not sent and FROM_EMAIL and SMTP_PASS and TO_EMAIL:
             sent = send_via_gmail(html, subject)
             
-        # Fallback to Telegram if email fails
+        # Fallback to Telegram if email fails or credentials missing
         if not sent and (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-            txt = f"Found {len(new_jobs)} new video editor jobs today. Check email for details."
+            txt = f"Found {len(new_jobs)} new video editor jobs today."
             send_telegram_short(txt)
             
         print("[DONE] job_alert finished successfully")
@@ -342,4 +431,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
